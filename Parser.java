@@ -1,119 +1,220 @@
-import java.util.*;
+/**
+ * MelodyScript Predictive LL(1) Recursive-Descent Parser
+ * Pure Java (JDK 17+) implementation with zero third-party dependencies.
+ */
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+
+/**
+ * Predictive LL(1) recursive-descent parser for MelodyScript.
+ * Consumes tokens from {@link Lexer} using single-token lookahead and constructs
+ * an Abstract Syntax Tree (AST) rooted at {@link ProgramNode}.
+ *
+ * <p>EBNF Grammar:
+ * <pre>
+ * Program        ::= ( Statement )*
+ * Statement      ::= TempoStmt | InstrumentStmt | PhraseDefStmt | PlayStmt
+ * TempoStmt      ::= "tempo" NUMBER ";"
+ * InstrumentStmt ::= "instrument" IDENTIFIER ";"
+ * PhraseDefStmt  ::= "define" IDENTIFIER "{" NoteSequence "}"
+ * PlayStmt       ::= "play" ( IDENTIFIER | "repeat" NUMBER "{" NoteSequence "}" ) ";"
+ * NoteSequence   ::= Note ( "," Note )*
+ * Note           ::= ( NOTE_PITCH | REST ) NOTE_DURATION
+ * </pre>
+ */
 public class Parser {
-    private final List<Token> tokens;
-    private int current = 0;
 
-    public Parser(List<Token> tokens) {
-        this.tokens = tokens;
+    private final Lexer lexer;
+    private Token currentToken;
+
+    /**
+     * Constructs a Parser backed by the provided Lexer instance.
+     * Primes the single-token lookahead buffer.
+     *
+     * @param lexer the lexical analyzer
+     */
+    public Parser(Lexer lexer) {
+        this.lexer = Objects.requireNonNull(lexer, "lexer cannot be null");
+        this.currentToken = this.lexer.nextToken();
     }
 
-    public ASTNodes.ProgramNode parseProgram() {
-        ASTNodes.ProgramNode program = new ASTNodes.ProgramNode();
-        while (!isAtEnd()) {
-            program.statements.add(parseStatement());
+    /**
+     * Convenience constructor that creates a Lexer from a source String.
+     *
+     * @param source source DSL code
+     */
+    public Parser(String source) {
+        this(new Lexer(source));
+    }
+
+    /**
+     * Parses the entire MelodyScript input into a ProgramNode AST.
+     *
+     * @return ProgramNode root of the parsed AST
+     * @throws SyntaxException if a syntax violation or unexpected token occurs
+     */
+    public ProgramNode parse() {
+        List<ASTNode> statements = new ArrayList<>();
+        int rootLine = currentToken.getLine();
+        int rootCol = currentToken.getColumn();
+
+        while (!check(Token.TokenType.EOF)) {
+            statements.add(parseStatement());
         }
-        return program;
+
+        consume(Token.TokenType.EOF, "<EOF>");
+        return new ProgramNode(statements, rootLine, rootCol);
     }
 
-    private ASTNodes.ASTNode parseStatement() {
-        Token t = peek();
-        switch (t.type) {
-            case TEMPO: return parseTempo();
-            case INSTRUMENT: return parseInstrument();
-            case DEFINE: return parsePhraseDef();
-            case PLAY: return parsePlay();
-            default:
-                throw error(t, "Expected statement starting with 'tempo', 'instrument', 'define', or 'play'.");
-        }
+    /**
+     * Statement ::= TempoStmt | InstrumentStmt | PhraseDefStmt | PlayStmt
+     */
+    private ASTNode parseStatement() {
+        return switch (currentToken.getType()) {
+            case KEYWORD_TEMPO -> parseTempoStmt();
+            case KEYWORD_INSTRUMENT -> parseInstrumentStmt();
+            case KEYWORD_DEFINE -> parsePhraseDefStmt();
+            case KEYWORD_PLAY -> parsePlayStmt();
+            default -> throw new SyntaxException("statement starting with 'tempo', 'instrument', 'define', or 'play'", currentToken);
+        };
     }
 
-    private ASTNodes.TempoNode parseTempo() {
-        consume(Token.TokenType.TEMPO, "Expected 'tempo'");
-        Token num = consume(Token.TokenType.NUMBER, "Expected numeric BPM value after 'tempo'");
-        consume(Token.TokenType.SEMICOLON, "Expected ';' after tempo statement");
-        return new ASTNodes.TempoNode(Integer.parseInt(num.lexeme));
+    /**
+     * TempoStmt ::= "tempo" NUMBER ";"
+     */
+    private TempoNode parseTempoStmt() {
+        Token tempoToken = consume(Token.TokenType.KEYWORD_TEMPO, "'tempo'");
+        Token numToken = consume(Token.TokenType.NUMBER, "tempo BPM value (positive integer)");
+        consume(Token.TokenType.SEMICOLON, "';' after tempo declaration");
+
+        int bpm = Integer.parseInt(numToken.getLexeme());
+        return new TempoNode(bpm, tempoToken.getLine(), tempoToken.getColumn());
     }
 
-    private ASTNodes.InstrumentNode parseInstrument() {
-        consume(Token.TokenType.INSTRUMENT, "Expected 'instrument'");
-        Token id = consume(Token.TokenType.IDENTIFIER, "Expected instrument identifier");
-        consume(Token.TokenType.SEMICOLON, "Expected ';' after instrument statement");
-        return new ASTNodes.InstrumentNode(id.lexeme);
+    /**
+     * InstrumentStmt ::= "instrument" IDENTIFIER ";"
+     */
+    private InstrumentNode parseInstrumentStmt() {
+        Token instToken = consume(Token.TokenType.KEYWORD_INSTRUMENT, "'instrument'");
+        Token idToken = consume(Token.TokenType.IDENTIFIER, "instrument name identifier");
+        consume(Token.TokenType.SEMICOLON, "';' after instrument declaration");
+
+        return new InstrumentNode(idToken.getLexeme(), instToken.getLine(), instToken.getColumn());
     }
 
-    private ASTNodes.PhraseDefNode parsePhraseDef() {
-        consume(Token.TokenType.DEFINE, "Expected 'define'");
-        Token id = consume(Token.TokenType.IDENTIFIER, "Expected phrase identifier");
-        consume(Token.TokenType.LBRACE, "Expected '{' before note sequence");
-        ASTNodes.NoteSequenceNode sequence = parseNoteSequence();
-        consume(Token.TokenType.RBRACE, "Expected '}' after note sequence");
-        return new ASTNodes.PhraseDefNode(id.lexeme, sequence);
+    /**
+     * PhraseDefStmt ::= "define" IDENTIFIER "{" NoteSequence "}"
+     */
+    private PhraseDefNode parsePhraseDefStmt() {
+        Token defToken = consume(Token.TokenType.KEYWORD_DEFINE, "'define'");
+        Token idToken = consume(Token.TokenType.IDENTIFIER, "phrase name identifier");
+        consume(Token.TokenType.LBRACE, "'{' to open phrase definition block");
+        NoteSequenceNode sequence = parseNoteSequence();
+        consume(Token.TokenType.RBRACE, "'}' to close phrase definition block");
+
+        return new PhraseDefNode(idToken.getLexeme(), sequence, defToken.getLine(), defToken.getColumn());
     }
 
-    private ASTNodes.PlayNode parsePlay() {
-        consume(Token.TokenType.PLAY, "Expected 'play'");
-        if (match(Token.TokenType.REPEAT)) {
-            Token count = consume(Token.TokenType.NUMBER, "Expected repeat count after 'repeat'");
-            consume(Token.TokenType.LBRACE, "Expected '{' before repeat block");
-            ASTNodes.NoteSequenceNode sequence = parseNoteSequence();
-            consume(Token.TokenType.RBRACE, "Expected '}' after repeat block");
-            consume(Token.TokenType.SEMICOLON, "Expected ';' after play repeat statement");
-            return new ASTNodes.PlayNode(new ASTNodes.RepeatNode(Integer.parseInt(count.lexeme), sequence));
+    /**
+     * PlayStmt ::= "play" ( IDENTIFIER | "repeat" NUMBER "{" NoteSequence "}" ) ";"
+     */
+    private PlayNode parsePlayStmt() {
+        Token playToken = consume(Token.TokenType.KEYWORD_PLAY, "'play'");
+
+        if (check(Token.TokenType.KEYWORD_REPEAT)) {
+            // Repeat block: "repeat" NUMBER "{" NoteSequence "}" ";"
+            advance(); // consume "repeat"
+            Token numToken = consume(Token.TokenType.NUMBER, "repeat count (positive integer)");
+            int count = Integer.parseInt(numToken.getLexeme());
+            consume(Token.TokenType.LBRACE, "'{' to open repeat block");
+            NoteSequenceNode sequence = parseNoteSequence();
+            consume(Token.TokenType.RBRACE, "'}' to close repeat block");
+            consume(Token.TokenType.SEMICOLON, "';' after repeat play statement");
+
+            return new PlayNode(null, count, sequence, true, playToken.getLine(), playToken.getColumn());
+        } else if (check(Token.TokenType.IDENTIFIER)) {
+            // Phrase invocation: IDENTIFIER ";"
+            Token idToken = advance(); // consume identifier
+            consume(Token.TokenType.SEMICOLON, "';' after phrase play statement");
+
+            return new PlayNode(idToken.getLexeme(), 1, null, false, playToken.getLine(), playToken.getColumn());
         } else {
-            Token id = consume(Token.TokenType.IDENTIFIER, "Expected phrase identifier after 'play'");
-            consume(Token.TokenType.SEMICOLON, "Expected ';' after play statement");
-            return new ASTNodes.PlayNode(id.lexeme);
+            throw new SyntaxException("phrase identifier or 'repeat' after 'play'", currentToken);
         }
     }
 
-    private ASTNodes.NoteSequenceNode parseNoteSequence() {
-        ASTNodes.NoteSequenceNode seq = new ASTNodes.NoteSequenceNode();
-        seq.notes.add(parseNote());
-        while (match(Token.TokenType.COMMA)) {
-            seq.notes.add(parseNote());
+    /**
+     * NoteSequence ::= Note ( "," Note )*
+     */
+    private NoteSequenceNode parseNoteSequence() {
+        List<ASTNode> notes = new ArrayList<>();
+        int seqLine = currentToken.getLine();
+        int seqCol = currentToken.getColumn();
+
+        notes.add(parseNote());
+        while (check(Token.TokenType.COMMA)) {
+            advance(); // consume ','
+            notes.add(parseNote());
         }
-        return seq;
+        return new NoteSequenceNode(notes, seqLine, seqCol);
     }
 
-    private ASTNodes.NoteNode parseNote() {
-        Token pitch = consume(Token.TokenType.PITCH, "Expected pitch literal (e.g., C4, F#5, R)");
-        Token duration = consume(Token.TokenType.DURATION, "Expected duration literal (e.g., quarter, eighth)");
-        return new ASTNodes.NoteNode(pitch.lexeme, duration.lexeme);
-    }
-
-    // Helper Utility Methods
-    private Token consume(Token.TokenType type, String message) {
-        if (check(type)) return advance();
-        throw error(peek(), message);
-    }
-
-    private boolean match(Token.TokenType... types) {
-        for (Token.TokenType type : types) {
-            if (check(type)) {
-                advance();
-                return true;
-            }
+    /**
+     * Note ::= ( NOTE_PITCH | REST ) NOTE_DURATION
+     */
+    private ASTNode parseNote() {
+        if (check(Token.TokenType.NOTE_PITCH)) {
+            Token pitchToken = advance();
+            Token durToken = consume(Token.TokenType.NOTE_DURATION, "note duration ('quarter', 'eighth', 'half', 'whole')");
+            return new NoteNode(
+                pitchToken.getLexeme(),
+                pitchToken.getPitchValue(),
+                durToken.getLexeme(),
+                durToken.getDurationTicks(),
+                pitchToken.getLine(),
+                pitchToken.getColumn()
+            );
+        } else if (check(Token.TokenType.REST)) {
+            Token restToken = advance();
+            Token durToken = consume(Token.TokenType.NOTE_DURATION, "rest duration ('quarter', 'eighth', 'half', 'whole')");
+            return new RestNode(
+                durToken.getLexeme(),
+                durToken.getDurationTicks(),
+                restToken.getLine(),
+                restToken.getColumn()
+            );
+        } else {
+            throw new SyntaxException("note pitch (e.g., C4, Eb5) or rest ('R')", currentToken);
         }
-        return false;
     }
 
+    /**
+     * Checks if current lookahead token matches the expected token type without consuming it.
+     */
     private boolean check(Token.TokenType type) {
-        if (isAtEnd()) return false;
-        return peek().type == type;
+        return currentToken.getType() == type;
     }
 
+    /**
+     * Consumes the current lookahead token and advances to the next token.
+     */
     private Token advance() {
-        if (!isAtEnd()) current++;
-        return previous();
+        Token previous = currentToken;
+        if (currentToken.getType() != Token.TokenType.EOF) {
+            currentToken = lexer.nextToken();
+        }
+        return previous;
     }
 
-    private boolean isAtEnd() { return peek().type == Token.TokenType.EOF; }
-    private Token peek() { return tokens.get(current); }
-    private Token previous() { return tokens.get(current - 1); }
-
-    private RuntimeException error(Token token, String message) {
-        return new RuntimeException(String.format("Syntax Error at [%d:%d]: %s (Found '%s')", 
-                token.line, token.column, message, token.lexeme));
+    /**
+     * Consumes the current token if it matches expectedType, or throws SyntaxException.
+     */
+    private Token consume(Token.TokenType expectedType, String description) {
+        if (check(expectedType)) {
+            return advance();
+        }
+        throw new SyntaxException(description != null ? description : expectedType.name(), currentToken);
     }
 }
